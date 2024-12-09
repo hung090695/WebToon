@@ -6,7 +6,8 @@ import requests
 import time
 import threading
 import re
-
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 app = Flask(__name__)
 CORS(app)  # Cho phép kết nối từ React frontend
@@ -25,13 +26,12 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Tạo bảng manga để lưu trữ thông tin về manga, bao gồm bìa và nội dung
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS manga (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
-            cover_image TEXT,      
-            content TEXT           
+            cover_image TEXT,
+            content TEXT
         )
     ''')
 
@@ -130,19 +130,16 @@ def get_manga_history(user_id):
     conn.close()
     
     if history:
-        return jsonify([
-            {
-                "manga_title": row["manga_title"],
-                "last_read_at": row["last_read_at"],
-                "cover_image": row["cover_image"],
-                "content": row["content"]
-            } for row in history
-        ]), 200
+        return jsonify([{
+            "manga_title": row["manga_title"],
+            "last_read_at": row["last_read_at"],
+            "cover_image": row["cover_image"],
+            "content": row["content"]
+        } for row in history]), 200
     else:
         return jsonify({"message": "No manga history found"}), 404
 
-
-
+# API xóa manga khỏi lịch sử đọc
 @app.route('/api/delete-manga-history', methods=['DELETE'])
 def delete_manga_history():
     data = request.json
@@ -157,8 +154,6 @@ def delete_manga_history():
     
     return jsonify({"message": "Manga removed from history"}), 200
 
-
-
 # Chức năng tải manga từ MangaDex
 def fetch_and_save_manga_from_mangadex():
     base_url = "https://api.mangadex.org"
@@ -170,20 +165,17 @@ def fetch_and_save_manga_from_mangadex():
 
         mangas = response.json().get("data", [])
 
-        # Kết nối cơ sở dữ liệu
         conn = get_db_connection()
         cursor = conn.cursor()
 
         for manga in mangas:
-            # Lấy thông tin cơ bản
             title = manga["attributes"]["title"].get("en", "").strip()
             description = manga["attributes"]["description"].get("en", "").strip()
 
-            if not title or not description:  # Bỏ qua nếu thiếu tiêu đề hoặc mô tả
+            if not title or not description:
                 print(f"Skipping manga due to missing title or description: {manga['id']}")
                 continue
 
-            # Lấy thông tin bìa
             manga_id = manga["id"]
             cover_response = requests.get(f"{base_url}/cover", params={"manga[]": manga_id})
             cover_image = ""
@@ -193,16 +185,14 @@ def fetch_and_save_manga_from_mangadex():
                     cover_file = covers[0]["attributes"]["fileName"]
                     cover_image = f"https://uploads.mangadex.org/covers/{manga_id}/{cover_file}"
 
-            if not cover_image:  # Bỏ qua nếu không có bìa
+            if not cover_image:
                 print(f"Skipping manga due to missing cover image: {title}")
                 continue
 
-            # Check if manga already exists in the database
             cursor.execute('SELECT COUNT(*) FROM manga WHERE title = ?', (title,))
             exists = cursor.fetchone()[0] > 0
 
             if not exists:
-                # Lưu vào cơ sở dữ liệu
                 cursor.execute('''
                     INSERT INTO manga (title, cover_image, content)
                     VALUES (?, ?, ?)
@@ -216,15 +206,12 @@ def fetch_and_save_manga_from_mangadex():
     except Exception as e:
         print(f"Error fetching manga: {e}")
 
-
-
 # Chạy cập nhật manga trong một luồng riêng biệt
 def continuously_update_manga(interval=60):
     while True:
         fetch_and_save_manga_from_mangadex()
         print(f"Waiting for {interval} seconds before fetching new manga...")
         time.sleep(interval)
-
 
 # API để lấy thông tin manga (bao gồm bìa và nội dung)
 @app.route('/api/manga-details/<int:manga_id>', methods=['GET'])
@@ -243,19 +230,13 @@ def get_manga_details(manga_id):
         }), 200
     else:
         return jsonify({"message": "Manga not found"}), 404
-    
 
-    # API đề xuất manga dựa trên lịch sử đọc của người dùng
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from flask import jsonify
-
+# API đề xuất manga dựa trên lịch sử đọc của người dùng
 @app.route('/api/recommend-manga/<int:user_id>', methods=['GET'])
 def recommend_manga(user_id):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Fetch the user's reading history from the database
     cursor.execute('''
         SELECT manga_title, content 
         FROM manga_reading_history 
@@ -266,11 +247,9 @@ def recommend_manga(user_id):
     if not user_history:
         return jsonify({"message": "No reading history found for this user."}), 404
 
-    # Prepare the user's reading contents and manga titles
     user_read_contents = [item['content'] for item in user_history]
     read_titles = {item['manga_title'] for item in user_history}
 
-    # Fetch all available manga details (title, content, cover_image)
     cursor.execute('SELECT id, title, content, cover_image FROM manga')
     all_manga = cursor.fetchall()
     conn.close()
@@ -278,28 +257,22 @@ def recommend_manga(user_id):
     if not all_manga:
         return jsonify({"message": "No manga found in the database."}), 404
 
-    # Prepare lists of all manga titles and their content
     manga_titles = [manga['title'] for manga in all_manga]
     manga_contents = [manga['content'] for manga in all_manga]
 
-    # Create the TF-IDF matrix combining user history and all manga content
     vectorizer = TfidfVectorizer(stop_words='english')
     tfidf_matrix = vectorizer.fit_transform(user_read_contents + manga_contents)
 
-    # Separate user vector and manga vectors
     user_vector = tfidf_matrix[:len(user_read_contents)]
     manga_vectors = tfidf_matrix[len(user_read_contents):]
 
-    # Calculate cosine similarity between user reading history and all manga
     similarities = cosine_similarity(user_vector, manga_vectors)
 
-    # Create a list for recommendations
     recommended = []
-
     for idx, manga in enumerate(all_manga):
-        if manga['title'] not in read_titles:  # Exclude already-read manga
-            similarity_score = max(similarities[:, idx])  # Get the highest similarity score
-            if similarity_score > 0.05:  # Similarity threshold (can be adjusted)
+        if manga['title'] not in read_titles:
+            similarity_score = max(similarities[:, idx])
+            if similarity_score > 0.05:
                 recommended.append({
                     "manga_title": manga['title'],
                     "cover_image": manga['cover_image'],
@@ -307,26 +280,21 @@ def recommend_manga(user_id):
                     "similarity_score": similarity_score
                 })
 
-    # Sort recommendations by similarity score in descending order
     recommended = sorted(recommended, key=lambda x: x['similarity_score'], reverse=True)
 
-    # Return top 5 manga recommendations
     if recommended:
-        return jsonify(recommended[:5]), 200  # Limit to top 5 recommendations
+        return jsonify(recommended[:5]), 200
     else:
         return jsonify({"message": "No recommendations found based on your history."}), 404
 
-
-
-
+# API tìm manga theo cảm xúc
 emotion_keywords = {
     "happy": ["joy", "happy", "exciting", "cheerful", "delightful"],
     "sad": ["tragic", "emotional", "heartbreaking", "sorrowful", "melancholic"],
     "angry": ["furious", "rage", "angry", "upset", "frustrated"],
-    "suprised": ["suprising", "unexpected", "amazing", "astonishing", "shocking"],
-    "funny": ["humor", "funny", "comedy", "hilarious", "laugh"],
+    "surprised": ["surprising", "unexpected", "amazing", "astonishing", "shocking"],
+    "funny": ["humor", "funny", "comedy", "hilarious", "laugh"]
 }
-
 
 @app.route('/api/search-by-emotion', methods=['GET'])
 def search_by_emotion():
@@ -344,10 +312,7 @@ def search_by_emotion():
     manga_data = cursor.fetchall()
     conn.close()
 
-    # To keep track of unique manga based on title
     seen_titles = set()
-
-    # Filter manga based on keywords and avoid duplicates
     result = [
         {
             "title": manga[0],
@@ -356,7 +321,7 @@ def search_by_emotion():
         }
         for manga in manga_data
         if any(re.search(rf"\b{keyword}\b", manga[1], re.IGNORECASE) for keyword in keywords)
-        and manga[0] not in seen_titles and not seen_titles.add(manga[0])  # Ensure uniqueness by title
+        and manga[0] not in seen_titles and not seen_titles.add(manga[0])
     ]
 
     if not result:
@@ -364,16 +329,15 @@ def search_by_emotion():
 
     return jsonify(result), 200
 
-
-
-
-
+@app.route('/api/mangadex', methods=['GET'])
+def proxy_mangadex():
+    endpoint = request.args.get('endpoint')
+    mangadex_url = f"https://api.mangadex.org/{endpoint}"
+    response = requests.get(mangadex_url, params=request.args)
+    return jsonify(response.json())
 
 if __name__ == '__main__':
-    # Khởi tạo cơ sở dữ liệu (nếu chưa có)
     init_db()
-    # Chạy luồng cập nhật manga
     updater_thread = threading.Thread(target=continuously_update_manga, args=(60,), daemon=True)
     updater_thread.start()
     app.run(debug=True)
-
